@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "${EUID}" -ne 0 ]; then
+    exec sudo "$0" "$@"
+fi
+
 CONTROL_IP="${1:?control IP is required}"
 WORKER_IP="${2:?worker IP is required}"
 K3S_TOKEN="${3:?K3s token is required}"

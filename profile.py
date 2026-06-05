@@ -121,6 +121,7 @@ lan.addInterface(control_iface)
 expected_nodes = params.worker_count + 1
 control_command = " ".join(
     [
+        "sudo",
         "/local/repository/scripts/setup-k3s-server.sh",
         shell_quote(CONTROL_IP),
         shell_quote(params.k3s_token),
@@ -142,6 +143,7 @@ for i in range(params.worker_count):
 
     worker_command = " ".join(
         [
+            "sudo",
             "/local/repository/scripts/setup-k3s-agent.sh",
             shell_quote(CONTROL_IP),
             shell_quote(worker_ip),
