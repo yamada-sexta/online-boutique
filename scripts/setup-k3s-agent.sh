@@ -29,7 +29,7 @@ if [ -z "${LAN_IFACE}" ]; then
     exit 1
 fi
 
-until curl -kfsS "https://${CONTROL_IP}:6443/readyz" >/dev/null 2>&1; do
+until timeout 3 bash -c ":</dev/tcp/${CONTROL_IP}/6443" >/dev/null 2>&1; do
     echo "Waiting for K3s server API at ${CONTROL_IP}:6443..."
     sleep 5
 done
