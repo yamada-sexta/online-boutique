@@ -20,7 +20,10 @@ What it does
 * Installs K3s agents on every worker and joins them to the control plane.
 * Clones an Online Boutique git repository on `control`.
 * Applies `release/kubernetes-manifests.yaml`.
+* Deploys Jaeger 2.19 all-in-one for local in-memory tracing.
+* Enables OpenTelemetry tracing on instrumented Online Boutique services.
 * Exposes the frontend as a Kubernetes NodePort, defaulting to port `30080`.
+* Exposes the Jaeger UI as a Kubernetes NodePort, defaulting to port `30686`.
 
 Profile parameters
 ------------------
@@ -30,6 +33,7 @@ Profile parameters
   `https://github.com/GoogleCloudPlatform/microservices-demo.git`.
 * `repo_ref`: branch, tag, or commit to deploy. The default is `main`.
 * `node_port`: frontend NodePort. The default is `30080`.
+* `jaeger_ui_port`: Jaeger UI NodePort. The default is `30686`.
 * `k3s_token`: shared K3s join token. The default is fine for a class/demo
   experiment; change it if you need a less guessable token.
 
@@ -53,12 +57,19 @@ Open the app:
 http://<control-hostname>:30080
 ```
 
+Open Jaeger:
+
+```text
+http://<control-hostname>:30686
+```
+
 Inspect Kubernetes:
 
 ```sh
 sudo kubectl get nodes -o wide
 sudo kubectl get pods -o wide
 sudo kubectl get service frontend-external
+sudo kubectl get service jaeger jaeger-ui
 ```
 
 Worker setup logs are on each worker:
@@ -66,3 +77,24 @@ Worker setup logs are on each worker:
 ```sh
 sudo tail -f /local/logs/k3s-agent-setup.log
 ```
+
+Collect latency data
+--------------------
+
+Run this on the `control` node after the app is ready:
+
+```sh
+/local/repository/scripts/collect-latency.py \
+  --endpoint http://$(hostname -f):30080/ \
+  --samples 100
+```
+
+The collector writes:
+
+* `http-samples.csv`: per-request RTT, TCP connect time, request time,
+  time-to-first-byte, and response time.
+* `jaeger-spans.csv`: raw trace spans from Jaeger.
+* `service-latency.csv`: per-service span-duration summaries.
+* `summary.json`: aggregate HTTP and trace statistics.
+
+Outputs are placed under `/local/latency/<timestamp>/`.

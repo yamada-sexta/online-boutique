@@ -11,6 +11,7 @@ EXPECTED_NODES="${3:?expected node count is required}"
 REPO_URL="${4:-https://github.com/GoogleCloudPlatform/microservices-demo.git}"
 REPO_REF="${5:-main}"
 NODE_PORT="${6:-30080}"
+JAEGER_UI_PORT="${7:-30686}"
 
 LOG_DIR="/local/logs"
 APP_DIR="/local/online-boutique"
@@ -25,6 +26,7 @@ echo "Expected Kubernetes nodes: ${EXPECTED_NODES}"
 echo "Repository: ${REPO_URL}"
 echo "Ref: ${REPO_REF}"
 echo "NodePort: ${NODE_PORT}"
+echo "Jaeger UI NodePort: ${JAEGER_UI_PORT}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -98,10 +100,49 @@ kubectl patch service frontend-external --type merge -p "{
   }
 }"
 
+kubectl apply -f /local/repository/k8s/jaeger.yaml
+kubectl patch service jaeger-ui --type merge -p "{
+  \"spec\": {
+    \"ports\": [
+      {
+        \"name\": \"ui\",
+        \"port\": 16686,
+        \"targetPort\": 16686,
+        \"nodePort\": ${JAEGER_UI_PORT}
+      }
+    ]
+  }
+}"
+kubectl rollout status deployment/jaeger --timeout=300s
+
+for service in \
+    checkoutservice \
+    currencyservice \
+    emailservice \
+    frontend \
+    paymentservice \
+    productcatalogservice \
+    recommendationservice; do
+    kubectl set env "deployment/${service}" \
+        ENABLE_TRACING=1 \
+        "COLLECTOR_SERVICE_ADDR=jaeger:4317" \
+        "OTEL_SERVICE_NAME=${service}"
+done
+
 kubectl rollout status deployment/frontend --timeout=600s
+for service in \
+    checkoutservice \
+    currencyservice \
+    emailservice \
+    paymentservice \
+    productcatalogservice \
+    recommendationservice; do
+    kubectl rollout status "deployment/${service}" --timeout=600s
+done
 kubectl get nodes -o wide
 kubectl get pods -o wide
 kubectl get service frontend-external -o wide
+kubectl get service jaeger jaeger-ui -o wide
 
 cat > "${ACCESS_FILE}" <<EOF
 Online Boutique is deployed on a multi-node K3s cluster.
@@ -109,11 +150,16 @@ Online Boutique is deployed on a multi-node K3s cluster.
 Frontend:
   http://$(hostname -f):${NODE_PORT}
 
+Jaeger UI:
+  http://$(hostname -f):${JAEGER_UI_PORT}
+
 Useful commands:
   sudo tail -f ${LOG_DIR}/online-boutique-setup.log
   sudo kubectl get nodes -o wide
   sudo kubectl get pods -o wide
   sudo kubectl get service frontend-external
+  sudo kubectl get service jaeger jaeger-ui
+  /local/repository/scripts/collect-latency.py --endpoint http://$(hostname -f):${NODE_PORT}/
 EOF
 
 cat "${ACCESS_FILE}"

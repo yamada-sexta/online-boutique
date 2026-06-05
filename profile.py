@@ -32,6 +32,7 @@ import geni.rspec.pg as rspec
 DEFAULT_REPO = "https://github.com/GoogleCloudPlatform/microservices-demo.git"
 DEFAULT_REF = "main"
 DEFAULT_NODE_PORT = 30080
+DEFAULT_JAEGER_UI_PORT = 30686
 DEFAULT_WORKER_COUNT = 2
 DEFAULT_K3S_TOKEN = "cloudlab-online-boutique-k3s"
 CONTROL_IP = "192.168.10.10"
@@ -61,6 +62,12 @@ portal.context.defineParameter(
     "Frontend NodePort",
     portal.ParameterType.INTEGER,
     DEFAULT_NODE_PORT,
+)
+portal.context.defineParameter(
+    "jaeger_ui_port",
+    "Jaeger UI NodePort",
+    portal.ParameterType.INTEGER,
+    DEFAULT_JAEGER_UI_PORT,
 )
 portal.context.defineParameter(
     "k3s_token",
@@ -99,6 +106,22 @@ if params.node_port < 30000 or params.node_port > 32767:
         )
     )
 
+if params.jaeger_ui_port < 30000 or params.jaeger_ui_port > 32767:
+    portal.context.reportError(
+        portal.ParameterError(
+            "jaeger_ui_port must be in Kubernetes' default NodePort range, 30000-32767.",
+            ["jaeger_ui_port"],
+        )
+    )
+
+if params.jaeger_ui_port == params.node_port:
+    portal.context.reportError(
+        portal.ParameterError(
+            "jaeger_ui_port must be different from node_port.",
+            ["jaeger_ui_port", "node_port"],
+        )
+    )
+
 if len(params.k3s_token) < 8 or " " in params.k3s_token:
     portal.context.reportError(
         portal.ParameterError(
@@ -129,6 +152,7 @@ control_command = " ".join(
         shell_quote(params.repo_url),
         shell_quote(params.repo_ref),
         str(params.node_port),
+        str(params.jaeger_ui_port),
     ]
 )
 control.addService(rspec.Execute(shell="bash", command=control_command))
