@@ -35,8 +35,23 @@ DEFAULT_NODE_PORT = 30080
 DEFAULT_JAEGER_UI_PORT = 30686
 DEFAULT_WORKER_COUNT = 2
 DEFAULT_K3S_TOKEN = "cloudlab-online-boutique-k3s"
+DEFAULT_RESULTS_REPO = "git@github.com:yamada-sexta/online-boutique-bench-res.git"
+DEFAULT_RESULTS_BRANCH = "main"
+DEFAULT_GITHUB_KEY_USER = "yamada-sexta"
+DEFAULT_SSH_KEY_LOGIN = "angl5"
 CONTROL_IP = "192.168.10.10"
 NETMASK = "255.255.255.0"
+
+
+def bool_arg(value):
+    return "true" if value else "false"
+
+
+def safe_name(value, allowed_extra):
+    if not value:
+        return False
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" + allowed_extra
+    return all(char in allowed for char in value)
 
 
 portal.context.defineParameter(
@@ -74,6 +89,42 @@ portal.context.defineParameter(
     "K3s cluster join token",
     portal.ParameterType.STRING,
     DEFAULT_K3S_TOKEN,
+)
+portal.context.defineParameter(
+    "benchmark_enabled",
+    "Run benchmark after deployment",
+    portal.ParameterType.BOOLEAN,
+    True,
+)
+portal.context.defineParameter(
+    "results_push_enabled",
+    "Push benchmark results to git",
+    portal.ParameterType.BOOLEAN,
+    True,
+)
+portal.context.defineParameter(
+    "results_repo",
+    "Benchmark results repository",
+    portal.ParameterType.STRING,
+    DEFAULT_RESULTS_REPO,
+)
+portal.context.defineParameter(
+    "results_branch",
+    "Benchmark results branch",
+    portal.ParameterType.STRING,
+    DEFAULT_RESULTS_BRANCH,
+)
+portal.context.defineParameter(
+    "github_key_user",
+    "GitHub user whose public SSH keys are installed on each node",
+    portal.ParameterType.STRING,
+    DEFAULT_GITHUB_KEY_USER,
+)
+portal.context.defineParameter(
+    "ssh_key_login",
+    "CloudLab login that receives the GitHub public SSH keys",
+    portal.ParameterType.STRING,
+    DEFAULT_SSH_KEY_LOGIN,
 )
 
 params = portal.context.bindParameters()
@@ -130,6 +181,38 @@ if len(params.k3s_token) < 8 or " " in params.k3s_token:
         )
     )
 
+if params.results_push_enabled and not params.results_repo:
+    portal.context.reportError(
+        portal.ParameterError(
+            "results_repo is required when results_push_enabled is true.",
+            ["results_repo", "results_push_enabled"],
+        )
+    )
+
+if params.results_branch and " " in params.results_branch:
+    portal.context.reportError(
+        portal.ParameterError(
+            "results_branch must not contain spaces.",
+            ["results_branch"],
+        )
+    )
+
+if not safe_name(params.github_key_user, "-"):
+    portal.context.reportError(
+        portal.ParameterError(
+            "github_key_user may contain only letters, numbers, and hyphens.",
+            ["github_key_user"],
+        )
+    )
+
+if not safe_name(params.ssh_key_login, "-_"):
+    portal.context.reportError(
+        portal.ParameterError(
+            "ssh_key_login may contain only letters, numbers, hyphens, and underscores.",
+            ["ssh_key_login"],
+        )
+    )
+
 portal.context.verifyParameters()
 
 request = portal.context.makeRequestRSpec()
@@ -153,6 +236,12 @@ control_command = " ".join(
         shell_quote(params.repo_ref),
         str(params.node_port),
         str(params.jaeger_ui_port),
+        shell_quote(bool_arg(params.benchmark_enabled)),
+        shell_quote(bool_arg(params.results_push_enabled)),
+        shell_quote(params.results_repo),
+        shell_quote(params.results_branch),
+        shell_quote(params.github_key_user),
+        shell_quote(params.ssh_key_login),
     ]
 )
 control.addService(rspec.Execute(shell="bash", command=control_command))
@@ -172,6 +261,8 @@ for i in range(params.worker_count):
             shell_quote(CONTROL_IP),
             shell_quote(worker_ip),
             shell_quote(params.k3s_token),
+            shell_quote(params.github_key_user),
+            shell_quote(params.ssh_key_login),
         ]
     )
     worker.addService(rspec.Execute(shell="bash", command=worker_command))

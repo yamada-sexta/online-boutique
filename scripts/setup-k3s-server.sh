@@ -12,10 +12,18 @@ REPO_URL="${4:-https://github.com/GoogleCloudPlatform/microservices-demo.git}"
 REPO_REF="${5:-main}"
 NODE_PORT="${6:-30080}"
 JAEGER_UI_PORT="${7:-30686}"
+BENCHMARK_ENABLED="${8:-true}"
+RESULTS_PUSH_ENABLED="${9:-true}"
+RESULTS_REPO="${10:-git@github.com:yamada-sexta/online-boutique-bench-res.git}"
+RESULTS_BRANCH="${11:-main}"
+GITHUB_KEY_USER="${12:-yamada-sexta}"
+SSH_KEY_LOGIN="${13:-angl5}"
 
 LOG_DIR="/local/logs"
 APP_DIR="/local/online-boutique"
 ACCESS_FILE="/local/online-boutique-access.txt"
+BENCHMARK_CONFIG="/local/repository/benchmark/config.json"
+BENCHMARK_OUTPUT_ROOT="/local/benchmark-results"
 
 mkdir -p "${LOG_DIR}"
 exec > >(tee -a "${LOG_DIR}/online-boutique-setup.log") 2>&1
@@ -27,11 +35,19 @@ echo "Repository: ${REPO_URL}"
 echo "Ref: ${REPO_REF}"
 echo "NodePort: ${NODE_PORT}"
 echo "Jaeger UI NodePort: ${JAEGER_UI_PORT}"
+echo "Benchmark enabled: ${BENCHMARK_ENABLED}"
+echo "Results push enabled: ${RESULTS_PUSH_ENABLED}"
+echo "Results repository: ${RESULTS_REPO}"
+echo "Results branch: ${RESULTS_BRANCH}"
+echo "GitHub key user: ${GITHUB_KEY_USER}"
+echo "SSH key login: ${SSH_KEY_LOGIN}"
 
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y ca-certificates curl git jq
+apt-get install -y ca-certificates curl git jq openssh-client
+
+/local/repository/scripts/install-github-keys.sh "${GITHUB_KEY_USER}" "${SSH_KEY_LOGIN}"
 
 LAN_IFACE="$(ip -o -4 addr show | awk -v ip="${CONTROL_IP}" '$0 ~ ip {print $2; exit}')"
 if [ -z "${LAN_IFACE}" ]; then
@@ -144,6 +160,30 @@ kubectl get pods -o wide
 kubectl get service frontend-external -o wide
 kubectl get service jaeger jaeger-ui -o wide
 
+BENCHMARK_OUTPUT_DIR=""
+if [ "${BENCHMARK_ENABLED}" = "true" ]; then
+    RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+    BENCHMARK_OUTPUT_DIR="${BENCHMARK_OUTPUT_ROOT}/${RUN_ID}"
+    FRONTEND_ENDPOINT="http://$(hostname -f):${NODE_PORT}/"
+    JAEGER_CLUSTER_IP="$(kubectl get svc/jaeger -o jsonpath='{.spec.clusterIP}')"
+    JAEGER_URL="http://${JAEGER_CLUSTER_IP}:16686"
+
+    echo "Starting benchmark run ${RUN_ID}"
+    /local/repository/scripts/run-benchmark.py \
+        --config "${BENCHMARK_CONFIG}" \
+        --endpoint "${FRONTEND_ENDPOINT}" \
+        --jaeger-url "${JAEGER_URL}" \
+        --output-dir "${BENCHMARK_OUTPUT_DIR}"
+    echo "Finished benchmark run ${RUN_ID}; output: ${BENCHMARK_OUTPUT_DIR}"
+
+    if [ "${RESULTS_PUSH_ENABLED}" = "true" ]; then
+        /local/repository/scripts/push-benchmark-results.sh \
+            "${BENCHMARK_OUTPUT_DIR}" \
+            "${RESULTS_REPO}" \
+            "${RESULTS_BRANCH}"
+    fi
+fi
+
 cat > "${ACCESS_FILE}" <<EOF
 Online Boutique is deployed on a multi-node K3s cluster.
 
@@ -160,6 +200,12 @@ Useful commands:
   sudo kubectl get service frontend-external
   sudo kubectl get service jaeger jaeger-ui
   /local/repository/scripts/collect-latency.py --endpoint http://$(hostname -f):${NODE_PORT}/
+  /local/repository/scripts/run-benchmark.py --endpoint http://$(hostname -f):${NODE_PORT}/
+
+Benchmark:
+  Enabled: ${BENCHMARK_ENABLED}
+  Results push enabled: ${RESULTS_PUSH_ENABLED}
+  Last output directory: ${BENCHMARK_OUTPUT_DIR:-not run}
 EOF
 
 cat "${ACCESS_FILE}"

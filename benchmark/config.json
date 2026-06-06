@@ -1,0 +1,23 @@
+{
+  "target_rps": 5,
+  "duration_seconds": 60,
+  "warmup_seconds": 10,
+  "concurrency": 8,
+  "request_timeout_seconds": 30,
+  "request_paths": [
+    {
+      "path": "/",
+      "weight": 1
+    }
+  ],
+  "rtt_samples": 10,
+  "rtt_interval_seconds": 1,
+  "user_agent": "cloudlab-online-boutique-benchmark/1.0",
+  "jaeger": {
+    "trace_service": "all",
+    "trace_limit": 500,
+    "lookback": "1h",
+    "flush_wait_seconds": 10
+  },
+  "output_root": "/local/benchmark-results"
+}

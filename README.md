@@ -24,6 +24,11 @@ What it does
 * Enables OpenTelemetry tracing on instrumented Online Boutique services.
 * Exposes the frontend as a Kubernetes NodePort, defaulting to port `30080`.
 * Exposes the Jaeger UI as a Kubernetes NodePort, defaulting to port `30686`.
+* Runs a configured benchmark after deployment.
+* Pushes benchmark results to a git repository using the committed base64
+  encoded submission deploy key.
+* Adds the public SSH keys from `github_key_user` to `ssh_key_login` on every
+  experiment node.
 
 Profile parameters
 ------------------
@@ -36,6 +41,44 @@ Profile parameters
 * `jaeger_ui_port`: Jaeger UI NodePort. The default is `30686`.
 * `k3s_token`: shared K3s join token. The default is fine for a class/demo
   experiment; change it if you need a less guessable token.
+* `benchmark_enabled`: run the benchmark after deployment. The default is
+  `true`.
+* `results_push_enabled`: push benchmark results to git. The default is `true`.
+* `results_repo`: git URL for the private benchmark results repository. The
+  default is `git@github.com:yamada-sexta/online-boutique-bench-res.git`.
+* `results_branch`: branch to push results to. The default is `main`.
+* `github_key_user`: GitHub user whose public SSH keys are added to each node.
+  The default is `yamada-sexta`.
+* `ssh_key_login`: CloudLab login that receives those SSH keys. The default is
+  `angl5`.
+
+Benchmark result deploy key
+---------------------------
+
+This profile includes an Ed25519 deploy key pair:
+
+* `keys/submission-key.b64`
+* `keys/submission-key.pub`
+
+Before enabling result pushes, add `keys/submission-key.pub` as a write-enabled
+deploy key on `yamada-sexta/online-boutique-bench-res`. During setup, only the
+control node decodes the base64 private key into `/root/.ssh/submission-key`
+for the git push.
+
+Benchmark configuration
+-----------------------
+
+The automatic benchmark reads `benchmark/config.json`. By default, it sends a
+small, steady load to the frontend, records HTTP timing fields with `curl`,
+collects RTT samples with `ping`, queries Jaeger for service/span latency, and
+captures Kubernetes metadata.
+
+Automatic output is written to `/local/benchmark-results/<timestamp>/` on the
+control node and then pushed to:
+
+```text
+runs/<control-hostname>/<timestamp>/
+```
 
 The local path `/home/yamada/Repos/microservices-demo` cannot be cloned by a
 CloudLab node. To deploy local changes from that repo, push them to a public or
@@ -98,3 +141,15 @@ The collector writes:
 * `summary.json`: aggregate HTTP and trace statistics.
 
 Outputs are placed under `/local/latency/<timestamp>/`.
+
+Run the configured benchmark manually
+-------------------------------------
+
+The setup script runs this automatically when `benchmark_enabled=true`, but it
+can also be run manually on the control node:
+
+```sh
+sudo /local/repository/scripts/run-benchmark.py \
+  --config /local/repository/benchmark/config.json \
+  --endpoint http://$(hostname -f):30080/
+```
