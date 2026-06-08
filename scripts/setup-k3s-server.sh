@@ -18,6 +18,15 @@ RESULTS_REPO="${10:-git@github.com:yamada-sexta/online-boutique-bench-res.git}"
 RESULTS_BRANCH="${11:-main}"
 GITHUB_KEY_USER="${12:-yamada-sexta}"
 SSH_KEY_LOGIN="${13:-angl5}"
+BENCHMARK_TARGET_RPS="${14:-5}"
+BENCHMARK_DURATION_SECONDS="${15:-60}"
+BENCHMARK_WARMUP_SECONDS="${16:-10}"
+BENCHMARK_CONCURRENCY="${17:-8}"
+BENCHMARK_REQUEST_TIMEOUT_SECONDS="${18:-30}"
+BENCHMARK_REQUEST_PATHS="${19:-/}"
+BENCHMARK_RTT_SAMPLES="${20:-10}"
+BENCHMARK_TRACE_LIMIT="${21:-500}"
+BENCHMARK_LOOKBACK="${22:-1h}"
 
 LOG_DIR="/local/logs"
 APP_DIR="/local/online-boutique"
@@ -41,6 +50,15 @@ echo "Results repository: ${RESULTS_REPO}"
 echo "Results branch: ${RESULTS_BRANCH}"
 echo "GitHub key user: ${GITHUB_KEY_USER}"
 echo "SSH key login: ${SSH_KEY_LOGIN}"
+echo "Benchmark target RPS: ${BENCHMARK_TARGET_RPS}"
+echo "Benchmark duration seconds: ${BENCHMARK_DURATION_SECONDS}"
+echo "Benchmark warmup seconds: ${BENCHMARK_WARMUP_SECONDS}"
+echo "Benchmark concurrency: ${BENCHMARK_CONCURRENCY}"
+echo "Benchmark request timeout seconds: ${BENCHMARK_REQUEST_TIMEOUT_SECONDS}"
+echo "Benchmark request paths: ${BENCHMARK_REQUEST_PATHS}"
+echo "Benchmark RTT samples: ${BENCHMARK_RTT_SAMPLES}"
+echo "Benchmark trace limit: ${BENCHMARK_TRACE_LIMIT}"
+echo "Benchmark lookback: ${BENCHMARK_LOOKBACK}"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -173,7 +191,16 @@ if [ "${BENCHMARK_ENABLED}" = "true" ]; then
         --config "${BENCHMARK_CONFIG}" \
         --endpoint "${FRONTEND_ENDPOINT}" \
         --jaeger-url "${JAEGER_URL}" \
-        --output-dir "${BENCHMARK_OUTPUT_DIR}"
+        --output-dir "${BENCHMARK_OUTPUT_DIR}" \
+        --target-rps "${BENCHMARK_TARGET_RPS}" \
+        --duration-seconds "${BENCHMARK_DURATION_SECONDS}" \
+        --warmup-seconds "${BENCHMARK_WARMUP_SECONDS}" \
+        --concurrency "${BENCHMARK_CONCURRENCY}" \
+        --request-timeout-seconds "${BENCHMARK_REQUEST_TIMEOUT_SECONDS}" \
+        --request-paths "${BENCHMARK_REQUEST_PATHS}" \
+        --rtt-samples "${BENCHMARK_RTT_SAMPLES}" \
+        --trace-limit "${BENCHMARK_TRACE_LIMIT}" \
+        --lookback "${BENCHMARK_LOOKBACK}"
     echo "Finished benchmark run ${RUN_ID}; output: ${BENCHMARK_OUTPUT_DIR}"
 
     if [ "${RESULTS_PUSH_ENABLED}" = "true" ]; then
@@ -204,6 +231,11 @@ Useful commands:
 
 Benchmark:
   Enabled: ${BENCHMARK_ENABLED}
+  Target RPS: ${BENCHMARK_TARGET_RPS}
+  Duration seconds: ${BENCHMARK_DURATION_SECONDS}
+  Warmup seconds: ${BENCHMARK_WARMUP_SECONDS}
+  Concurrency: ${BENCHMARK_CONCURRENCY}
+  Request paths: ${BENCHMARK_REQUEST_PATHS}
   Results push enabled: ${RESULTS_PUSH_ENABLED}
   Last output directory: ${BENCHMARK_OUTPUT_DIR:-not run}
 EOF

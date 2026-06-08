@@ -35,6 +35,32 @@ def load_config(path):
         return json.load(handle)
 
 
+def apply_overrides(config, args):
+    if args.target_rps is not None:
+        config["target_rps"] = args.target_rps
+    if args.duration_seconds is not None:
+        config["duration_seconds"] = args.duration_seconds
+    if args.warmup_seconds is not None:
+        config["warmup_seconds"] = args.warmup_seconds
+    if args.concurrency is not None:
+        config["concurrency"] = args.concurrency
+    if args.request_timeout_seconds is not None:
+        config["request_timeout_seconds"] = args.request_timeout_seconds
+    if args.request_paths:
+        config["request_paths"] = [
+            {"path": path.strip(), "weight": 1}
+            for path in args.request_paths.split(",")
+            if path.strip()
+        ]
+    if args.rtt_samples is not None:
+        config["rtt_samples"] = args.rtt_samples
+    if args.trace_limit is not None:
+        config.setdefault("jaeger", {})["trace_limit"] = args.trace_limit
+    if args.lookback:
+        config.setdefault("jaeger", {})["lookback"] = args.lookback
+    return config
+
+
 def percentile(values, pct):
     if not values:
         return None
@@ -518,9 +544,22 @@ def main():
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--jaeger-url", default=None)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--target-rps", type=float, default=None)
+    parser.add_argument("--duration-seconds", type=float, default=None)
+    parser.add_argument("--warmup-seconds", type=float, default=None)
+    parser.add_argument("--concurrency", type=int, default=None)
+    parser.add_argument("--request-timeout-seconds", type=float, default=None)
+    parser.add_argument(
+        "--request-paths",
+        default=None,
+        help="Comma-separated request paths, overriding config request_paths.",
+    )
+    parser.add_argument("--rtt-samples", type=int, default=None)
+    parser.add_argument("--trace-limit", type=int, default=None)
+    parser.add_argument("--lookback", default=None)
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config = apply_overrides(load_config(args.config), args)
     random.seed(config.get("random_seed", 1))
 
     output_root = config.get("output_root", DEFAULT_OUTPUT_ROOT)

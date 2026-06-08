@@ -43,6 +43,23 @@ Profile parameters
   experiment; change it if you need a less guessable token.
 * `benchmark_enabled`: run the benchmark after deployment. The default is
   `true`.
+* `benchmark_target_rps`: target frontend requests per second. The default is
+  `5`.
+* `benchmark_duration_seconds`: benchmark measurement duration. The default is
+  `60`.
+* `benchmark_warmup_seconds`: warmup duration before measured requests. The
+  default is `10`.
+* `benchmark_concurrency`: maximum concurrent benchmark requests. The default
+  is `8`.
+* `benchmark_request_timeout_seconds`: per-request timeout. The default is
+  `30`.
+* `benchmark_request_paths`: comma-separated frontend paths to request. The
+  default is `/`.
+* `benchmark_rtt_samples`: number of ping RTT samples to collect. The default
+  is `10`.
+* `benchmark_trace_limit`: Jaeger trace query limit per service. The default is
+  `500`.
+* `benchmark_lookback`: Jaeger trace lookback window. The default is `1h`.
 * `results_push_enabled`: push benchmark results to git. The default is `true`.
 * `results_repo`: git URL for the private benchmark results repository. The
   default is `git@github.com:yamada-sexta/online-boutique-bench-res.git`.
@@ -72,6 +89,11 @@ The automatic benchmark reads `benchmark/config.json`. By default, it sends a
 small, steady load to the frontend, records HTTP timing fields with `curl`,
 collects RTT samples with `ping`, queries Jaeger for service/span latency, and
 captures Kubernetes metadata.
+
+Profile parameters override the matching values from `benchmark/config.json` at
+experiment creation time. This lets you instantiate the same profile with
+different RPS, duration, concurrency, path, RTT, and Jaeger trace settings
+without editing the repository.
 
 Automatic output is written to `/local/benchmark-results/<timestamp>/` on the
 control node and then pushed to:

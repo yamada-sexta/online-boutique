@@ -39,6 +39,15 @@ DEFAULT_RESULTS_REPO = "git@github.com:yamada-sexta/online-boutique-bench-res.gi
 DEFAULT_RESULTS_BRANCH = "main"
 DEFAULT_GITHUB_KEY_USER = "yamada-sexta"
 DEFAULT_SSH_KEY_LOGIN = "angl5"
+DEFAULT_BENCHMARK_TARGET_RPS = 5
+DEFAULT_BENCHMARK_DURATION_SECONDS = 60
+DEFAULT_BENCHMARK_WARMUP_SECONDS = 10
+DEFAULT_BENCHMARK_CONCURRENCY = 8
+DEFAULT_BENCHMARK_REQUEST_TIMEOUT_SECONDS = 30
+DEFAULT_BENCHMARK_REQUEST_PATHS = "/"
+DEFAULT_BENCHMARK_RTT_SAMPLES = 10
+DEFAULT_BENCHMARK_TRACE_LIMIT = 500
+DEFAULT_BENCHMARK_LOOKBACK = "1h"
 CONTROL_IP = "192.168.10.10"
 NETMASK = "255.255.255.0"
 
@@ -52,6 +61,12 @@ def safe_name(value, allowed_extra):
         return False
     allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" + allowed_extra
     return all(char in allowed for char in value)
+
+
+def valid_lookback(value):
+    if len(value) < 2:
+        return False
+    return value[:-1].isdigit() and value[-1] in "smhdw"
 
 
 portal.context.defineParameter(
@@ -95,6 +110,60 @@ portal.context.defineParameter(
     "Run benchmark after deployment",
     portal.ParameterType.BOOLEAN,
     True,
+)
+portal.context.defineParameter(
+    "benchmark_target_rps",
+    "Benchmark target requests per second",
+    portal.ParameterType.INTEGER,
+    DEFAULT_BENCHMARK_TARGET_RPS,
+)
+portal.context.defineParameter(
+    "benchmark_duration_seconds",
+    "Benchmark duration in seconds",
+    portal.ParameterType.INTEGER,
+    DEFAULT_BENCHMARK_DURATION_SECONDS,
+)
+portal.context.defineParameter(
+    "benchmark_warmup_seconds",
+    "Benchmark warmup duration in seconds",
+    portal.ParameterType.INTEGER,
+    DEFAULT_BENCHMARK_WARMUP_SECONDS,
+)
+portal.context.defineParameter(
+    "benchmark_concurrency",
+    "Benchmark request concurrency",
+    portal.ParameterType.INTEGER,
+    DEFAULT_BENCHMARK_CONCURRENCY,
+)
+portal.context.defineParameter(
+    "benchmark_request_timeout_seconds",
+    "Benchmark per-request timeout in seconds",
+    portal.ParameterType.INTEGER,
+    DEFAULT_BENCHMARK_REQUEST_TIMEOUT_SECONDS,
+)
+portal.context.defineParameter(
+    "benchmark_request_paths",
+    "Comma-separated frontend request paths",
+    portal.ParameterType.STRING,
+    DEFAULT_BENCHMARK_REQUEST_PATHS,
+)
+portal.context.defineParameter(
+    "benchmark_rtt_samples",
+    "Benchmark ping RTT sample count",
+    portal.ParameterType.INTEGER,
+    DEFAULT_BENCHMARK_RTT_SAMPLES,
+)
+portal.context.defineParameter(
+    "benchmark_trace_limit",
+    "Jaeger trace query limit per service",
+    portal.ParameterType.INTEGER,
+    DEFAULT_BENCHMARK_TRACE_LIMIT,
+)
+portal.context.defineParameter(
+    "benchmark_lookback",
+    "Jaeger trace lookback window",
+    portal.ParameterType.STRING,
+    DEFAULT_BENCHMARK_LOOKBACK,
 )
 portal.context.defineParameter(
     "results_push_enabled",
@@ -189,6 +258,93 @@ if params.results_push_enabled and not params.results_repo:
         )
     )
 
+if params.benchmark_target_rps < 1 or params.benchmark_target_rps > 10000:
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_target_rps must be between 1 and 10000.",
+            ["benchmark_target_rps"],
+        )
+    )
+
+if params.benchmark_duration_seconds < 1 or params.benchmark_duration_seconds > 86400:
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_duration_seconds must be between 1 and 86400.",
+            ["benchmark_duration_seconds"],
+        )
+    )
+
+if params.benchmark_warmup_seconds < 0 or params.benchmark_warmup_seconds > 3600:
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_warmup_seconds must be between 0 and 3600.",
+            ["benchmark_warmup_seconds"],
+        )
+    )
+
+if params.benchmark_concurrency < 1 or params.benchmark_concurrency > 4096:
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_concurrency must be between 1 and 4096.",
+            ["benchmark_concurrency"],
+        )
+    )
+
+if (
+    params.benchmark_request_timeout_seconds < 1
+    or params.benchmark_request_timeout_seconds > 300
+):
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_request_timeout_seconds must be between 1 and 300.",
+            ["benchmark_request_timeout_seconds"],
+        )
+    )
+
+if not params.benchmark_request_paths:
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_request_paths must contain at least one path.",
+            ["benchmark_request_paths"],
+        )
+    )
+
+for path in params.benchmark_request_paths.split(","):
+    path = path.strip()
+    if not path:
+        continue
+    if not (path.startswith("/") or path.startswith("http://") or path.startswith("https://")):
+        portal.context.reportError(
+            portal.ParameterError(
+                "benchmark_request_paths entries must start with '/', 'http://', or 'https://'.",
+                ["benchmark_request_paths"],
+            )
+        )
+
+if params.benchmark_rtt_samples < 0 or params.benchmark_rtt_samples > 1000:
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_rtt_samples must be between 0 and 1000.",
+            ["benchmark_rtt_samples"],
+        )
+    )
+
+if params.benchmark_trace_limit < 1 or params.benchmark_trace_limit > 10000:
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_trace_limit must be between 1 and 10000.",
+            ["benchmark_trace_limit"],
+        )
+    )
+
+if not valid_lookback(params.benchmark_lookback):
+    portal.context.reportError(
+        portal.ParameterError(
+            "benchmark_lookback must use digits and a Jaeger time unit like 30m, 1h, or 2d.",
+            ["benchmark_lookback"],
+        )
+    )
+
 if params.results_branch and " " in params.results_branch:
     portal.context.reportError(
         portal.ParameterError(
@@ -242,6 +398,15 @@ control_command = " ".join(
         shell_quote(params.results_branch),
         shell_quote(params.github_key_user),
         shell_quote(params.ssh_key_login),
+        str(params.benchmark_target_rps),
+        str(params.benchmark_duration_seconds),
+        str(params.benchmark_warmup_seconds),
+        str(params.benchmark_concurrency),
+        str(params.benchmark_request_timeout_seconds),
+        shell_quote(params.benchmark_request_paths),
+        str(params.benchmark_rtt_samples),
+        str(params.benchmark_trace_limit),
+        shell_quote(params.benchmark_lookback),
     ]
 )
 control.addService(rspec.Execute(shell="bash", command=control_command))
