@@ -99,7 +99,7 @@ mkdir -p "${BENCHMARK_OUTPUT_DIR}"
 
 echo "Starting benchmark run ${RUN_ID}"
 cd /local/repository
-uv run scripts/run-benchmark.py \
+uv run --script scripts/run-benchmark.py \
     --endpoint "${FRONTEND_ENDPOINT}" \
     --jaeger-url "${JAEGER_URL}" \
     --prometheus-url "${PROMETHEUS_URL}" \

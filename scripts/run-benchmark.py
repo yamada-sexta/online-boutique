@@ -1,4 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.14"
+# dependencies = []
+# [tool.uv]
+# exclude-newer = "2026-06-09T00:00:00Z"
+# ///
 """Run an Online Boutique curl benchmark and collect latency/resource data."""
 
 import argparse
