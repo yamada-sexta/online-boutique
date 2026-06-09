@@ -28,6 +28,7 @@ RESOURCE_WINDOW="${20:-5m}"
 
 LOG_DIR="/local/logs"
 OUTPUT_ROOT="/local/benchmark-results"
+UV_INSTALL_DIR="/usr/local/bin"
 
 mkdir -p "${LOG_DIR}"
 exec > >(tee -a "${LOG_DIR}/benchmark-runner-setup.log") 2>&1
@@ -53,12 +54,27 @@ install_uv() {
     if command -v uv >/dev/null 2>&1; then
         return
     fi
-    if [ -x /root/.local/bin/uv ]; then
-        export PATH="/root/.local/bin:${PATH}"
-        return
+
+    export PATH="${UV_INSTALL_DIR}:/root/.local/bin:/users/${SSH_KEY_LOGIN}/.local/bin:/users/geniuser/.local/bin:${PATH}"
+    for uv_path in \
+        "${UV_INSTALL_DIR}/uv" \
+        "/root/.local/bin/uv" \
+        "/users/${SSH_KEY_LOGIN}/.local/bin/uv" \
+        "/users/geniuser/.local/bin/uv"; do
+        if [ -x "${uv_path}" ]; then
+            export PATH="$(dirname "${uv_path}"):${PATH}"
+            return
+        fi
+    done
+
+    curl -LsSf https://astral.sh/uv/install.sh -o /tmp/install-uv.sh
+    UV_INSTALL_DIR="${UV_INSTALL_DIR}" sh /tmp/install-uv.sh
+    chmod 755 "${UV_INSTALL_DIR}/uv" "${UV_INSTALL_DIR}/uvx" 2>/dev/null || true
+
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "uv installation completed but uv is not on PATH."
+        exit 1
     fi
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="/root/.local/bin:${PATH}"
 }
 
 wait_url() {
@@ -81,7 +97,8 @@ wait_url() {
 }
 
 install_uv
-export PATH="/root/.local/bin:${PATH}"
+export PATH="${UV_INSTALL_DIR}:/root/.local/bin:/users/${SSH_KEY_LOGIN}/.local/bin:/users/geniuser/.local/bin:${PATH}"
+uv --version
 
 FRONTEND_ENDPOINT="http://${CONTROL_IP}:${NODE_PORT}/"
 JAEGER_URL="http://${CONTROL_IP}:${JAEGER_UI_PORT}"

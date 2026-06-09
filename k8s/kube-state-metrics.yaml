@@ -98,18 +98,23 @@ spec:
       containers:
       - name: kube-state-metrics
         image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.14.0
+        args:
+        - --port=8080
+        - --telemetry-port=8081
         ports:
         - name: http-metrics
           containerPort: 8080
+        - name: telemetry
+          containerPort: 8081
         readinessProbe:
           httpGet:
             path: /readyz
-            port: 8080
+            port: telemetry
           initialDelaySeconds: 5
           periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /livez
-            port: 8080
+            port: telemetry
           initialDelaySeconds: 15
           periodSeconds: 20
