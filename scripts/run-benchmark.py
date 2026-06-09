@@ -21,7 +21,9 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
+from typing import TextIO, TypedDict
 
 
 DEFAULT_OUTPUT_ROOT = "/local/benchmark-results"
@@ -39,6 +41,84 @@ DEFAULT_TRACE_LOOKBACK = "1h"
 DEFAULT_TRACE_SERVICE = "all"
 DEFAULT_TRACE_FLUSH_WAIT_SECONDS = 10.0
 DEFAULT_RESOURCE_WINDOW = "5m"
+
+type CsvValue = str | int | float | None
+type CsvRow = dict[str, CsvValue]
+type JsonObject = Mapping[str, object]
+type TomlScalar = str | int | float | bool | None
+type TomlValue = TomlScalar | list[TomlScalar] | dict[str, "TomlValue"]
+type TomlTable = dict[str, TomlValue]
+
+
+class RequestPath(TypedDict):
+    path: str
+    weight: float
+
+
+class BenchmarkConfig(TypedDict):
+    target_rps: float
+    duration_seconds: float
+    warmup_seconds: float
+    concurrency: int
+    request_timeout_seconds: float
+    request_paths: list[RequestPath]
+    rtt_samples: int
+    rtt_interval_seconds: float
+    trace_service: str
+    trace_limit: int
+    trace_lookback: str
+    trace_flush_wait_seconds: float
+    resource_window: str
+    user_agent: str
+    random_seed: int
+
+
+class CurlSample(TypedDict, total=False):
+    task_id: int
+    worker_id: int
+    timestamp: str
+    scheduled_offset_ms: float | None
+    launch_delay_ms: float
+    path: str
+    url: str
+    http_code: int | None
+    wall_time_ms: float
+    dns_ms: float | None
+    tcp_connect_ms: float | None
+    tls_handshake_ms: float | None
+    request_time_ms: float | None
+    time_to_first_byte_ms: float | None
+    response_time_ms: float | None
+    response_transfer_ms: float | None
+    size_download_bytes: int | None
+    error: str
+
+
+class BenchmarkTask(TypedDict):
+    task_id: int
+    scheduled_at: float
+    scheduled_offset_seconds: float
+    path: str
+
+
+class LoadResult(TypedDict):
+    label: str
+    samples: list[CurlSample]
+    started_at: str
+    finished_at: str
+    wall_seconds: float
+    scheduled_requests: int
+
+
+class SummaryStats(TypedDict):
+    count: int
+    min: float | None
+    avg: float | None
+    p50: float | None
+    p90: float | None
+    p95: float | None
+    p99: float | None
+    max: float | None
 
 CONTAINER_COUNTER_METRICS = [
     "container_cpu_cfs_periods_total",
@@ -188,30 +268,80 @@ KUBERNETES_METADATA_FILES = [
 ]
 
 
-def now_iso():
+def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run(argv, check=False):
+def run(argv: Sequence[str], check: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, check=check, text=True, capture_output=True)
 
 
-def percentile(values, pct):
+def as_object_mapping(value: object) -> JsonObject:
+    if isinstance(value, Mapping):
+        return {str(key): child for key, child in value.items()}
+    return {}
+
+
+def as_object_list(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def as_string(value: object, default: str = "") -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return default
+    return str(value)
+
+
+def as_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def as_csv_value(value: object) -> CsvValue:
+    if value is None or isinstance(value, str | int | float):
+        return value
+    return str(value)
+
+
+def stats_to_csv_row(stats: SummaryStats) -> CsvRow:
+    return {
+        "count": stats["count"],
+        "min": stats["min"],
+        "avg": stats["avg"],
+        "p50": stats["p50"],
+        "p90": stats["p90"],
+        "p95": stats["p95"],
+        "p99": stats["p99"],
+        "max": stats["max"],
+    }
+
+
+def percentile(values: Sequence[float], pct: float) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
     if len(ordered) == 1:
         return ordered[0]
     rank = (len(ordered) - 1) * pct / 100.0
-    low = int(math.floor(rank))
-    high = int(math.ceil(rank))
+    low = math.floor(rank)
+    high = math.ceil(rank)
     if low == high:
         return ordered[low]
     weight = rank - low
     return ordered[low] * (1.0 - weight) + ordered[high] * weight
 
 
-def summarize(values):
+def summarize(values: Iterable[float | int | str | None]) -> SummaryStats:
     clean = [float(value) for value in values if value is not None and value != ""]
     if not clean:
         return {
@@ -236,8 +366,8 @@ def summarize(values):
     }
 
 
-def parse_request_paths(value):
-    paths = []
+def parse_request_paths(value: str) -> list[RequestPath]:
+    paths: list[RequestPath] = []
     for item in value.split(","):
         path = item.strip()
         if not path:
@@ -248,7 +378,7 @@ def parse_request_paths(value):
     return paths
 
 
-def choose_path(paths):
+def choose_path(paths: Sequence[RequestPath]) -> str:
     total = sum(path["weight"] for path in paths)
     marker = random.uniform(0.0, total)
     seen = 0.0
@@ -259,7 +389,7 @@ def choose_path(paths):
     return paths[-1]["path"]
 
 
-def build_url(endpoint, path):
+def build_url(endpoint: str, path: str) -> str:
     if path.startswith("http://") or path.startswith("https://"):
         return path
     if not path.startswith("/"):
@@ -267,20 +397,27 @@ def build_url(endpoint, path):
     return endpoint.rstrip("/") + path
 
 
-def fetch_bytes(url, timeout=30):
+def fetch_bytes(url: str, timeout: int = 30) -> bytes:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read()
 
 
-def fetch_text(url, timeout=30):
+def fetch_text(url: str, timeout: int = 30) -> str:
     return fetch_bytes(url, timeout=timeout).decode("utf-8")
 
 
-def fetch_json(url, timeout=30):
+def fetch_json(url: str, timeout: int = 30) -> object:
     return json.loads(fetch_text(url, timeout=timeout))
 
 
-def curl_sample(task_id, scheduled_at, endpoint, path, timeout, user_agent):
+def curl_sample(
+    task_id: int,
+    scheduled_at: float,
+    endpoint: str,
+    path: str,
+    timeout: float,
+    user_agent: str,
+) -> CurlSample:
     url = build_url(endpoint, path)
     fmt = "\t".join(
         [
@@ -379,7 +516,15 @@ def curl_sample(task_id, scheduled_at, endpoint, path, timeout, user_agent):
     return sample
 
 
-def benchmark_worker(worker_id, tasks, results, lock, endpoint, timeout, user_agent):
+def benchmark_worker(
+    worker_id: int,
+    tasks: queue.Queue[BenchmarkTask | None],
+    results: list[CurlSample],
+    lock: threading.Lock,
+    endpoint: str,
+    timeout: float,
+    user_agent: str,
+) -> None:
     while True:
         task = tasks.get()
         if task is None:
@@ -403,10 +548,15 @@ def benchmark_worker(worker_id, tasks, results, lock, endpoint, timeout, user_ag
         tasks.task_done()
 
 
-def run_load(endpoint, config, duration_seconds, label):
-    target_rps = float(config["target_rps"])
-    concurrency = int(config["concurrency"])
-    timeout = float(config["request_timeout_seconds"])
+def run_load(
+    endpoint: str,
+    config: BenchmarkConfig,
+    duration_seconds: float,
+    label: str,
+) -> LoadResult:
+    target_rps = config["target_rps"]
+    concurrency = config["concurrency"]
+    timeout = config["request_timeout_seconds"]
     user_agent = config["user_agent"]
     paths = config["request_paths"]
 
@@ -420,10 +570,10 @@ def run_load(endpoint, config, duration_seconds, label):
             "scheduled_requests": 0,
         }
 
-    scheduled_requests = int(round(target_rps * duration_seconds))
+    scheduled_requests = round(target_rps * duration_seconds)
     interval = 1.0 / target_rps
-    tasks = queue.Queue()
-    results = []
+    tasks: queue.Queue[BenchmarkTask | None] = queue.Queue()
+    results: list[CurlSample] = []
     lock = threading.Lock()
     workers = []
 
@@ -468,7 +618,7 @@ def run_load(endpoint, config, duration_seconds, label):
     }
 
 
-def ping_rtt_ms(host):
+def ping_rtt_ms(host: str | None) -> float | None:
     if not host:
         return None
     result = run(["ping", "-c", "1", "-W", "1", host])
@@ -480,8 +630,8 @@ def ping_rtt_ms(host):
     return float(match.group(1))
 
 
-def collect_rtt_samples(host, count, interval_seconds):
-    samples = []
+def collect_rtt_samples(host: str | None, count: int, interval_seconds: float) -> list[CsvRow]:
+    samples: list[CsvRow] = []
     for index in range(max(0, count)):
         samples.append(
             {
@@ -496,7 +646,7 @@ def collect_rtt_samples(host, count, interval_seconds):
     return samples
 
 
-def write_csv(path, fields, rows):
+def write_csv(path: str, fields: Sequence[str], rows: Iterable[Mapping[str, object]]) -> None:
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -504,25 +654,26 @@ def write_csv(path, fields, rows):
             writer.writerow({field: row.get(field, "") for field in fields})
 
 
-def prometheus_query(prometheus_url, query):
+def prometheus_query(prometheus_url: str, query: str) -> list[JsonObject]:
     params = urllib.parse.urlencode({"query": query})
     url = prometheus_url.rstrip("/") + "/api/v1/query?" + params
-    payload = fetch_json(url, timeout=60)
+    payload = as_object_mapping(fetch_json(url, timeout=60))
     if payload.get("status") != "success":
         raise RuntimeError("Prometheus query failed: " + json.dumps(payload, sort_keys=True))
-    return payload.get("data", {}).get("result", [])
+    data = as_object_mapping(payload.get("data"))
+    return [as_object_mapping(item) for item in as_object_list(data.get("result"))]
 
 
-def metric_value(item):
-    value = item.get("value", [None, None])[1]
-    if value is None:
+def metric_value(item: JsonObject) -> float:
+    values = as_object_list(item.get("value"))
+    if len(values) < 2:
         return 0.0
-    return float(value)
+    return as_float(values[1])
 
 
-def collect_container_metrics(prometheus_url, window):
-    rows = []
-    errors = []
+def collect_container_metrics(prometheus_url: str, window: str) -> tuple[list[CsvRow], list[str]]:
+    rows: list[CsvRow] = []
+    errors: list[str] = []
     for metric_name in CONTAINER_COUNTER_METRICS:
         query = 'rate({metric}{{image!="",container!="POD"}}[{window}])'.format(
             metric=metric_name,
@@ -534,26 +685,26 @@ def collect_container_metrics(prometheus_url, window):
             errors.append(metric_name + ": " + str(exc))
             continue
         for item in results:
-            metric = item.get("metric", {})
+            metric = as_object_mapping(item.get("metric"))
             rows.append(
                 {
                     "metric": metric_name,
-                    "namespace": metric.get("namespace", ""),
-                    "pod": metric.get("pod", ""),
-                    "container": metric.get("container", ""),
-                    "node": metric.get("node", ""),
-                    "interface": metric.get("interface", ""),
-                    "device": metric.get("device", ""),
-                    "operation": metric.get("operation", ""),
+                    "namespace": as_string(metric.get("namespace")),
+                    "pod": as_string(metric.get("pod")),
+                    "container": as_string(metric.get("container")),
+                    "node": as_string(metric.get("node")),
+                    "interface": as_string(metric.get("interface")),
+                    "device": as_string(metric.get("device")),
+                    "operation": as_string(metric.get("operation")),
                     "value": metric_value(item),
                 }
             )
     return rows, errors
 
 
-def collect_node_metrics(prometheus_url, window):
-    rows = []
-    errors = []
+def collect_node_metrics(prometheus_url: str, window: str) -> tuple[list[CsvRow], list[str]]:
+    rows: list[CsvRow] = []
+    errors: list[str] = []
     for metric_name in NODE_COUNTER_METRICS:
         query = "rate({metric}[" + window + "])"
         try:
@@ -562,70 +713,70 @@ def collect_node_metrics(prometheus_url, window):
             errors.append(metric_name + ": " + str(exc))
             continue
         for item in results:
-            metric = item.get("metric", {})
+            metric = as_object_mapping(item.get("metric"))
             rows.append(
                 {
                     "metric": metric_name,
-                    "node": metric.get("node", ""),
-                    "instance": metric.get("instance", ""),
-                    "cpu": metric.get("cpu", ""),
-                    "mode": metric.get("mode", ""),
-                    "device": metric.get("device", ""),
-                    "mountpoint": metric.get("mountpoint", ""),
-                    "fstype": metric.get("fstype", ""),
+                    "node": as_string(metric.get("node")),
+                    "instance": as_string(metric.get("instance")),
+                    "cpu": as_string(metric.get("cpu")),
+                    "mode": as_string(metric.get("mode")),
+                    "device": as_string(metric.get("device")),
+                    "mountpoint": as_string(metric.get("mountpoint")),
+                    "fstype": as_string(metric.get("fstype")),
                     "value": metric_value(item),
                 }
             )
     return rows, errors
 
 
-def collect_container_resource_limits(prometheus_url):
-    rows = []
-    errors = []
+def collect_container_resource_limits(prometheus_url: str) -> tuple[list[CsvRow], list[str]]:
+    rows: list[CsvRow] = []
+    errors: list[str] = []
     query = 'kube_pod_container_resource_limits{resource=~"cpu|memory"}'
     try:
         results = prometheus_query(prometheus_url, query)
     except Exception as exc:
         return rows, ["kube_pod_container_resource_limits: " + str(exc)]
     for item in results:
-        metric = item.get("metric", {})
+        metric = as_object_mapping(item.get("metric"))
         rows.append(
             {
-                "namespace": metric.get("namespace", ""),
-                "pod": metric.get("pod", ""),
-                "container": metric.get("container", ""),
-                "node": metric.get("node", ""),
-                "resource": metric.get("resource", ""),
-                "unit": metric.get("unit", ""),
+                "namespace": as_string(metric.get("namespace")),
+                "pod": as_string(metric.get("pod")),
+                "container": as_string(metric.get("container")),
+                "node": as_string(metric.get("node")),
+                "resource": as_string(metric.get("resource")),
+                "unit": as_string(metric.get("unit")),
                 "value": metric_value(item),
             }
         )
     return rows, errors
 
 
-def collect_deployment_replicas(prometheus_url):
-    rows = []
-    errors = []
+def collect_deployment_replicas(prometheus_url: str) -> tuple[list[CsvRow], list[str]]:
+    rows: list[CsvRow] = []
+    errors: list[str] = []
     query = "kube_deployment_status_replicas"
     try:
         results = prometheus_query(prometheus_url, query)
     except Exception as exc:
         return rows, ["kube_deployment_status_replicas: " + str(exc)]
     for item in results:
-        metric = item.get("metric", {})
+        metric = as_object_mapping(item.get("metric"))
         rows.append(
             {
-                "namespace": metric.get("namespace", ""),
-                "deployment": metric.get("deployment", ""),
+                "namespace": as_string(metric.get("namespace")),
+                "deployment": as_string(metric.get("deployment")),
                 "replicas": int(metric_value(item)),
             }
         )
     return rows, errors
 
 
-def collect_service_traffic_bytes(prometheus_url, window):
-    rows = []
-    errors = []
+def collect_service_traffic_bytes(prometheus_url: str, window: str) -> tuple[list[CsvRow], list[str]]:
+    rows: list[CsvRow] = []
+    errors: list[str] = []
     request_query = """
 sum by (source_workload, destination_workload) (
   increase(istio_request_bytes_sum{
@@ -651,11 +802,11 @@ sum by (source_workload, destination_workload) (
         request_results = []
         errors.append("istio_request_bytes_sum: " + str(exc))
     for item in request_results:
-        metric = item.get("metric", {})
+        metric = as_object_mapping(item.get("metric"))
         rows.append(
             {
-                "source_service": metric.get("source_workload", ""),
-                "destination_service": metric.get("destination_workload", ""),
+                "source_service": as_string(metric.get("source_workload")),
+                "destination_service": as_string(metric.get("destination_workload")),
                 "traffic_type": "request",
                 "bytes": round(metric_value(item), 2),
             }
@@ -667,11 +818,11 @@ sum by (source_workload, destination_workload) (
         response_results = []
         errors.append("istio_response_bytes_sum: " + str(exc))
     for item in response_results:
-        metric = item.get("metric", {})
+        metric = as_object_mapping(item.get("metric"))
         rows.append(
             {
-                "source_service": metric.get("destination_workload", ""),
-                "destination_service": metric.get("source_workload", ""),
+                "source_service": as_string(metric.get("destination_workload")),
+                "destination_service": as_string(metric.get("source_workload")),
                 "traffic_type": "response",
                 "bytes": round(metric_value(item), 2),
             }
@@ -687,7 +838,7 @@ sum by (source_workload, destination_workload) (
     ), errors
 
 
-def query_traces(jaeger_url, service, limit, lookback):
+def query_traces(jaeger_url: str, service: str, limit: int, lookback: str) -> list[JsonObject]:
     query = urllib.parse.urlencode(
         {
             "service": service,
@@ -696,30 +847,38 @@ def query_traces(jaeger_url, service, limit, lookback):
         }
     )
     url = jaeger_url.rstrip("/") + "/api/traces?" + query
-    return fetch_json(url, timeout=60).get("data", [])
+    payload = as_object_mapping(fetch_json(url, timeout=60))
+    return [as_object_mapping(item) for item in as_object_list(payload.get("data"))]
 
 
-def list_jaeger_services(jaeger_url):
+def list_jaeger_services(jaeger_url: str) -> list[str]:
     url = jaeger_url.rstrip("/") + "/api/services"
-    services = fetch_json(url, timeout=30).get("data", [])
+    payload = as_object_mapping(fetch_json(url, timeout=30))
+    services = [as_string(service) for service in as_object_list(payload.get("data"))]
     return sorted(service for service in services if service and service != "jaeger")
 
 
-def collect_traces(jaeger_url, services, limit, lookback):
-    unique_spans = {}
-    unique_roots = set()
-    root_durations_ms = []
+def collect_traces(
+    jaeger_url: str,
+    services: Sequence[str],
+    limit: int,
+    lookback: str,
+) -> tuple[list[CsvRow], list[float]]:
+    unique_spans: dict[str, CsvRow] = {}
+    unique_roots: set[str] = set()
+    root_durations_ms: list[float] = []
 
     for service in services:
         traces = query_traces(jaeger_url, service, limit, lookback)
         for trace in traces:
-            trace_id = trace.get("traceID", "")
-            processes = trace.get("processes", {})
-            for span in trace.get("spans", []):
-                span_id = span.get("spanID", "")
+            trace_id = as_string(trace.get("traceID"))
+            processes = as_object_mapping(trace.get("processes"))
+            for span_object in as_object_list(trace.get("spans")):
+                span = as_object_mapping(span_object)
+                span_id = as_string(span.get("spanID"))
                 key = trace_id + ":" + span_id
-                references = span.get("references", [])
-                duration_ms = float(span.get("duration", 0.0)) / 1000.0
+                references = [as_object_mapping(reference) for reference in as_object_list(span.get("references"))]
+                duration_ms = as_float(span.get("duration")) / 1000.0
 
                 if not references and key not in unique_roots:
                     unique_roots.add(key)
@@ -728,50 +887,56 @@ def collect_traces(jaeger_url, services, limit, lookback):
                 if key in unique_spans:
                     continue
 
-                process = processes.get(span.get("processID", ""), {})
-                service_name = process.get("serviceName", "unknown")
+                process_id = as_string(span.get("processID"))
+                process = as_object_mapping(processes.get(process_id))
+                service_name = as_string(process.get("serviceName"), "unknown")
 
                 unique_spans[key] = {
                     "trace_id": trace_id,
                     "span_id": span_id,
-                    "parent_span_id": references[0].get("spanID", "") if references else "",
+                    "parent_span_id": as_string(references[0].get("spanID")) if references else "",
                     "service": service_name,
-                    "operation": span.get("operationName", ""),
+                    "operation": as_string(span.get("operationName")),
                     "duration_ms": duration_ms,
-                    "start_time_unix_us": span.get("startTime", ""),
+                    "start_time_unix_us": as_string(span.get("startTime")),
                 }
 
     return list(unique_spans.values()), root_durations_ms
 
 
-def group_summary(rows, key_field, value_field):
-    grouped = {}
+def group_summary(rows: Iterable[Mapping[str, object]], key_field: str, value_field: str) -> dict[str, SummaryStats]:
+    grouped: dict[str, list[float | int | str | None]] = {}
     for row in rows:
-        grouped.setdefault(row[key_field], []).append(row[value_field])
+        grouped.setdefault(as_string(row.get(key_field)), []).append(as_csv_value(row.get(value_field)))
     return {key: summarize(values) for key, values in sorted(grouped.items())}
 
 
-def write_service_summary(path, spans):
-    rows = []
+def write_service_summary(path: str, spans: Iterable[Mapping[str, object]]) -> dict[str, dict[str, TomlValue]]:
+    rows: list[CsvRow] = []
     for service, summary in group_summary(spans, "service", "duration_ms").items():
-        row = {"service": service}
-        row.update(summary)
+        row: CsvRow = {"service": service}
+        row.update(stats_to_csv_row(summary))
         rows.append(row)
     write_csv(path, ["service", "count", "min", "avg", "p50", "p90", "p95", "p99", "max"], rows)
-    return {row["service"]: {k: row[k] for k in row if k != "service"} for row in rows}
+    return {as_string(row["service"]): {k: row[k] for k in row if k != "service"} for row in rows}
 
 
-def write_operation_summary(path, spans):
-    grouped = {}
+def write_operation_summary(path: str, spans: Iterable[Mapping[str, object]]) -> None:
+    grouped: dict[str, dict[str, object]] = {}
     for span in spans:
-        key = span["service"] + " " + span["operation"]
-        grouped.setdefault(key, {"service": span["service"], "operation": span["operation"], "values": []})
-        grouped[key]["values"].append(span["duration_ms"])
+        service = as_string(span.get("service"))
+        operation = as_string(span.get("operation"))
+        key = service + " " + operation
+        grouped.setdefault(key, {"service": service, "operation": operation, "values": []})
+        values = grouped[key]["values"]
+        if isinstance(values, list):
+            values.append(span.get("duration_ms"))
 
-    rows = []
+    rows: list[CsvRow] = []
     for item in sorted(grouped.values(), key=lambda row: (row["service"], row["operation"])):
-        row = {"service": item["service"], "operation": item["operation"]}
-        row.update(summarize(item["values"]))
+        values = item.get("values", [])
+        row: CsvRow = {"service": as_string(item.get("service")), "operation": as_string(item.get("operation"))}
+        row.update(stats_to_csv_row(summarize(values if isinstance(values, list) else [])))
         rows.append(row)
 
     write_csv(
@@ -781,7 +946,7 @@ def write_operation_summary(path, spans):
     )
 
 
-def capture_command(output_dir, filename, argv):
+def capture_command(output_dir: str, filename: str, argv: Sequence[str]) -> str:
     result = run(argv)
     path = os.path.join(output_dir, filename)
     with open(path, "w") as handle:
@@ -795,8 +960,8 @@ def capture_command(output_dir, filename, argv):
     return path
 
 
-def capture_kubernetes_metadata(output_dir, metadata_url):
-    outputs = {}
+def capture_kubernetes_metadata(output_dir: str, metadata_url: str | None) -> dict[str, str]:
+    outputs: dict[str, str] = {}
     if metadata_url:
         for filename in KUBERNETES_METADATA_FILES:
             path = os.path.join(output_dir, filename)
@@ -817,46 +982,47 @@ def capture_kubernetes_metadata(output_dir, metadata_url):
     }
 
 
-def status_counts(samples):
-    counts = {}
+def status_counts(samples: Iterable[Mapping[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
     for sample in samples:
         key = str(sample.get("http_code") or "error")
         counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items()))
 
 
-def is_error_sample(sample):
+def is_error_sample(sample: Mapping[str, object]) -> bool:
     if sample.get("error"):
         return True
     code = sample.get("http_code")
-    return code is None or int(code) >= 500
+    return code is None or int(as_float(code, 500.0)) >= 500
 
 
-def metric_summaries(rows, value_field):
-    grouped = {}
+def metric_summaries(rows: Iterable[Mapping[str, object]], value_field: str) -> dict[str, SummaryStats]:
+    grouped: dict[str, list[float | int | str | None]] = {}
     for row in rows:
-        grouped.setdefault(row["metric"], []).append(row.get(value_field))
+        grouped.setdefault(as_string(row.get("metric")), []).append(as_csv_value(row.get(value_field)))
     return {key: summarize(values) for key, values in sorted(grouped.items())}
 
 
-def traffic_summary(rows):
-    request_bytes = sum(float(row["bytes"]) for row in rows if row["traffic_type"] == "request")
-    response_bytes = sum(float(row["bytes"]) for row in rows if row["traffic_type"] == "response")
+def traffic_summary(rows: Iterable[Mapping[str, object]]) -> dict[str, float | int]:
+    materialized = list(rows)
+    request_bytes = sum(as_float(row.get("bytes")) for row in materialized if row.get("traffic_type") == "request")
+    response_bytes = sum(as_float(row.get("bytes")) for row in materialized if row.get("traffic_type") == "response")
     return {
-        "rows": len(rows),
+        "rows": len(materialized),
         "request_bytes": request_bytes,
         "response_bytes": response_bytes,
         "total_bytes": request_bytes + response_bytes,
     }
 
 
-def toml_key(key):
+def toml_key(key: str) -> str:
     if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*$", key):
         return key
-    return '"' + str(key).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def toml_value(value):
+def toml_value(value: object) -> str:
     if value is None:
         return "nan"
     if isinstance(value, bool):
@@ -875,7 +1041,7 @@ def toml_value(value):
     return '"' + escaped + '"'
 
 
-def write_toml_table(handle, table, path=None):
+def write_toml_table(handle: TextIO, table: Mapping[str, object], path: list[str] | None = None) -> None:
     if path is None:
         path = []
     scalars = []
@@ -894,12 +1060,12 @@ def write_toml_table(handle, table, path=None):
         write_toml_table(handle, value, path + [key])
 
 
-def write_toml(path, table):
+def write_toml(path: str, table: Mapping[str, object]) -> None:
     with open(path, "w") as handle:
         write_toml_table(handle, table)
 
 
-def format_value(value):
+def format_value(value: object) -> str:
     if value is None:
         return "nan"
     if isinstance(value, float):
@@ -907,42 +1073,48 @@ def format_value(value):
     return str(value)
 
 
-def write_summary_markdown(path, summary):
-    http = summary["http"]
+def write_summary_markdown(path: str, summary: Mapping[str, object]) -> None:
+    http = as_object_mapping(summary.get("http"))
+    run_summary = as_object_mapping(summary.get("run"))
+    config_summary = as_object_mapping(summary.get("config"))
+    resource = as_object_mapping(summary.get("resource"))
+    traffic = as_object_mapping(summary.get("traffic"))
+    outputs = as_object_mapping(summary.get("outputs"))
+    errors = [as_string(error) for error in as_object_list(summary.get("errors"))]
     with open(path, "w") as handle:
         handle.write("# Online Boutique Benchmark Result\n\n")
-        handle.write("* Endpoint: `{}`\n".format(summary["run"]["endpoint"]))
-        handle.write("* Target RPS: `{}`\n".format(summary["config"]["target_rps"]))
-        handle.write("* Achieved RPS: `{:.3f}`\n".format(http["achieved_rps"]))
-        handle.write("* Completed requests: `{}`\n".format(http["completed_requests"]))
-        handle.write("* Error requests: `{}`\n".format(http["error_requests"]))
-        handle.write("* Jaeger URL: `{}`\n".format(summary["run"]["jaeger_url"]))
-        handle.write("* Prometheus URL: `{}`\n\n".format(summary["run"].get("prometheus_url", "")))
+        handle.write("* Endpoint: `{}`\n".format(run_summary.get("endpoint", "")))
+        handle.write("* Target RPS: `{}`\n".format(config_summary.get("target_rps", "")))
+        handle.write("* Achieved RPS: `{:.3f}`\n".format(as_float(http.get("achieved_rps"))))
+        handle.write("* Completed requests: `{}`\n".format(http.get("completed_requests", "")))
+        handle.write("* Error requests: `{}`\n".format(http.get("error_requests", "")))
+        handle.write("* Jaeger URL: `{}`\n".format(run_summary.get("jaeger_url", "")))
+        handle.write("* Prometheus URL: `{}`\n\n".format(run_summary.get("prometheus_url", "")))
         handle.write("## HTTP Response Time MS\n\n")
+        response_time = as_object_mapping(http.get("response_time_ms"))
         for key in ["min", "avg", "p50", "p90", "p95", "p99", "max"]:
-            handle.write("* {}: `{}`\n".format(key, format_value(http["response_time_ms"].get(key))))
+            handle.write("* {}: `{}`\n".format(key, format_value(response_time.get(key))))
         handle.write("\n## Resource Rows\n\n")
-        resource = summary["resource"]
         handle.write("* Container metrics: `{}`\n".format(resource["container_metric_rows"]))
         handle.write("* Node metrics: `{}`\n".format(resource["node_metric_rows"]))
         handle.write("* Resource limits: `{}`\n".format(resource["container_resource_limit_rows"]))
         handle.write("* Deployment replicas: `{}`\n".format(resource["deployment_replica_rows"]))
-        handle.write("* Service traffic rows: `{}`\n".format(summary["traffic"]["rows"]))
-        handle.write("* Service traffic bytes: `{}`\n".format(format_value(summary["traffic"]["total_bytes"])))
+        handle.write("* Service traffic rows: `{}`\n".format(traffic["rows"]))
+        handle.write("* Service traffic bytes: `{}`\n".format(format_value(traffic["total_bytes"])))
         handle.write("\n## Outputs\n\n")
-        for name, output in sorted(summary["outputs"].items()):
+        for name, output in sorted(outputs.items()):
             if isinstance(output, dict):
                 for child_name, child_output in sorted(output.items()):
                     handle.write("* {}.{}: `{}`\n".format(name, child_name, child_output))
             else:
                 handle.write("* {}: `{}`\n".format(name, output))
-        if summary["errors"]:
+        if errors:
             handle.write("\n## Collection Errors\n\n")
-            for error in summary["errors"]:
+            for error in errors:
                 handle.write("* `{}`\n".format(error))
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--jaeger-url", default="http://jaeger:16686")
@@ -972,7 +1144,7 @@ def main():
     output_dir = args.output_dir or os.path.join(DEFAULT_OUTPUT_ROOT, timestamp)
     os.makedirs(output_dir, exist_ok=True)
 
-    config = {
+    config: BenchmarkConfig = {
         "target_rps": args.target_rps,
         "duration_seconds": args.duration_seconds,
         "warmup_seconds": args.warmup_seconds,
@@ -1009,10 +1181,10 @@ def main():
     if args.trace_flush_wait_seconds > 0:
         time.sleep(args.trace_flush_wait_seconds)
 
-    errors = []
-    trace_services = []
-    spans = []
-    root_durations_ms = []
+    errors: list[str] = []
+    trace_services: list[str] = []
+    spans: list[CsvRow] = []
+    root_durations_ms: list[float] = []
     try:
         if args.trace_service == "all":
             trace_services = list_jaeger_services(args.jaeger_url)
@@ -1050,11 +1222,11 @@ def main():
     service_summary = write_service_summary(service_csv, spans)
     write_operation_summary(operation_csv, spans)
 
-    container_rows = []
-    node_rows = []
-    limit_rows = []
-    replica_rows = []
-    traffic_rows = []
+    container_rows: list[CsvRow] = []
+    node_rows: list[CsvRow] = []
+    limit_rows: list[CsvRow] = []
+    replica_rows: list[CsvRow] = []
+    traffic_rows: list[CsvRow] = []
     if args.prometheus_url:
         container_rows, container_errors = collect_container_metrics(args.prometheus_url, args.resource_window)
         node_rows, node_errors = collect_node_metrics(args.prometheus_url, args.resource_window)
@@ -1082,10 +1254,10 @@ def main():
     success_response_times = [
         sample.get("response_time_ms")
         for sample in benchmark["samples"]
-        if not sample.get("error") and sample.get("http_code") and 200 <= int(sample["http_code"]) < 500
+        if not sample.get("error") and sample.get("http_code") and 200 <= sample["http_code"] < 500
     ]
 
-    outputs = {
+    outputs: dict[str, str | dict[str, str]] = {
         "http_samples_csv": http_csv,
         "rtt_samples_csv": rtt_csv,
         "jaeger_spans_csv": spans_csv,
@@ -1103,10 +1275,25 @@ def main():
     if warmup_csv:
         outputs["warmup_http_samples_csv"] = warmup_csv
 
-    summary_config = dict(config)
-    summary_config["request_paths"] = [path["path"] for path in config["request_paths"]]
+    summary_config: TomlTable = {
+        "target_rps": config["target_rps"],
+        "duration_seconds": config["duration_seconds"],
+        "warmup_seconds": config["warmup_seconds"],
+        "concurrency": config["concurrency"],
+        "request_timeout_seconds": config["request_timeout_seconds"],
+        "request_paths": [path["path"] for path in config["request_paths"]],
+        "rtt_samples": config["rtt_samples"],
+        "rtt_interval_seconds": config["rtt_interval_seconds"],
+        "trace_service": config["trace_service"],
+        "trace_limit": config["trace_limit"],
+        "trace_lookback": config["trace_lookback"],
+        "trace_flush_wait_seconds": config["trace_flush_wait_seconds"],
+        "resource_window": config["resource_window"],
+        "user_agent": config["user_agent"],
+        "random_seed": config["random_seed"],
+    }
 
-    summary = {
+    summary: dict[str, object] = {
         "run": {
             "endpoint": args.endpoint,
             "jaeger_url": args.jaeger_url,
