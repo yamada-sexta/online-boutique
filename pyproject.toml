@@ -1,7 +1,7 @@
 [project]
 name = "online-boutique"
 version = "0.1.0"
-description = "Add your description here"
+description = "CloudLab Online Boutique benchmark profile"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

@@ -12,27 +12,16 @@ REPO_URL="${4:-https://github.com/GoogleCloudPlatform/microservices-demo.git}"
 REPO_REF="${5:-main}"
 NODE_PORT="${6:-30080}"
 JAEGER_UI_PORT="${7:-30686}"
-BENCHMARK_ENABLED="${8:-true}"
-RESULTS_PUSH_ENABLED="${9:-true}"
-RESULTS_REPO="${10:-git@github.com:yamada-sexta/online-boutique-bench-res.git}"
-RESULTS_BRANCH="${11:-main}"
-GITHUB_KEY_USER="${12:-yamada-sexta}"
-SSH_KEY_LOGIN="${13:-angl5}"
-BENCHMARK_TARGET_RPS="${14:-5}"
-BENCHMARK_DURATION_SECONDS="${15:-60}"
-BENCHMARK_WARMUP_SECONDS="${16:-10}"
-BENCHMARK_CONCURRENCY="${17:-8}"
-BENCHMARK_REQUEST_TIMEOUT_SECONDS="${18:-30}"
-BENCHMARK_REQUEST_PATHS="${19:-/}"
-BENCHMARK_RTT_SAMPLES="${20:-10}"
-BENCHMARK_TRACE_LIMIT="${21:-500}"
-BENCHMARK_LOOKBACK="${22:-1h}"
+PROMETHEUS_PORT="${8:-30090}"
+METADATA_PORT="${9:-18080}"
+GITHUB_KEY_USER="${10:-yamada-sexta}"
+SSH_KEY_LOGIN="${11:-angl5}"
 
 LOG_DIR="/local/logs"
 APP_DIR="/local/online-boutique"
 ACCESS_FILE="/local/online-boutique-access.txt"
-BENCHMARK_CONFIG="/local/repository/benchmark/config.json"
-BENCHMARK_OUTPUT_ROOT="/local/benchmark-results"
+METADATA_DIR="/local/online-boutique-metadata"
+ISTIO_PARENT="/local"
 
 mkdir -p "${LOG_DIR}"
 exec > >(tee -a "${LOG_DIR}/online-boutique-setup.log") 2>&1
@@ -44,26 +33,15 @@ echo "Repository: ${REPO_URL}"
 echo "Ref: ${REPO_REF}"
 echo "NodePort: ${NODE_PORT}"
 echo "Jaeger UI NodePort: ${JAEGER_UI_PORT}"
-echo "Benchmark enabled: ${BENCHMARK_ENABLED}"
-echo "Results push enabled: ${RESULTS_PUSH_ENABLED}"
-echo "Results repository: ${RESULTS_REPO}"
-echo "Results branch: ${RESULTS_BRANCH}"
+echo "Prometheus NodePort: ${PROMETHEUS_PORT}"
+echo "Metadata HTTP port: ${METADATA_PORT}"
 echo "GitHub key user: ${GITHUB_KEY_USER}"
 echo "SSH key login: ${SSH_KEY_LOGIN}"
-echo "Benchmark target RPS: ${BENCHMARK_TARGET_RPS}"
-echo "Benchmark duration seconds: ${BENCHMARK_DURATION_SECONDS}"
-echo "Benchmark warmup seconds: ${BENCHMARK_WARMUP_SECONDS}"
-echo "Benchmark concurrency: ${BENCHMARK_CONCURRENCY}"
-echo "Benchmark request timeout seconds: ${BENCHMARK_REQUEST_TIMEOUT_SECONDS}"
-echo "Benchmark request paths: ${BENCHMARK_REQUEST_PATHS}"
-echo "Benchmark RTT samples: ${BENCHMARK_RTT_SAMPLES}"
-echo "Benchmark trace limit: ${BENCHMARK_TRACE_LIMIT}"
-echo "Benchmark lookback: ${BENCHMARK_LOOKBACK}"
 
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y ca-certificates curl git jq openssh-client
+apt-get install -y ca-certificates curl git jq openssh-client python3
 
 /local/repository/scripts/install-github-keys.sh "${GITHUB_KEY_USER}" "${SSH_KEY_LOGIN}"
 
@@ -107,6 +85,89 @@ fi
 
 kubectl wait --for=condition=Ready node --all --timeout=600s
 
+install_istio() {
+    if kubectl get namespace istio-system >/dev/null 2>&1 && kubectl -n istio-system get deployment/istiod >/dev/null 2>&1; then
+        echo "Istio already appears to be installed."
+    else
+        echo "Installing Istio."
+        cd "${ISTIO_PARENT}"
+        curl -L https://istio.io/downloadIstio | sh -
+        ISTIO_DIR="$(find "${ISTIO_PARENT}" -maxdepth 1 -type d -name 'istio-*' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {print $2}')"
+        if [ -z "${ISTIO_DIR}" ] || [ ! -x "${ISTIO_DIR}/bin/istioctl" ]; then
+            echo "Could not find downloaded istioctl."
+            exit 1
+        fi
+        "${ISTIO_DIR}/bin/istioctl" install -f "${ISTIO_DIR}/samples/bookinfo/demo-profile-no-gateways.yaml" -y
+    fi
+
+    kubectl label namespace default istio-injection=enabled --overwrite
+    kubectl rollout status deployment/istiod -n istio-system --timeout=600s
+}
+
+patch_nodeport() {
+    service_name="${1:?service name required}"
+    namespace="${2:?namespace required}"
+    port_name="${3:?port name required}"
+    port="${4:?port required}"
+    target_port="${5:?target port required}"
+    node_port="${6:?node port required}"
+
+    kubectl -n "${namespace}" patch service "${service_name}" --type merge -p "{
+      \"spec\": {
+        \"type\": \"NodePort\",
+        \"ports\": [
+          {
+            \"name\": \"${port_name}\",
+            \"port\": ${port},
+            \"targetPort\": ${target_port},
+            \"nodePort\": ${node_port}
+          }
+        ]
+      }
+    }"
+}
+
+capture_metadata_file() {
+    filename="${1:?filename required}"
+    shift
+    {
+        echo "$ $*"
+        echo
+        "$@" || echo
+    } > "${METADATA_DIR}/${filename}" 2>&1
+}
+
+publish_metadata() {
+    mkdir -p "${METADATA_DIR}"
+    capture_metadata_file "kubectl-nodes.txt" kubectl get nodes -o wide
+    capture_metadata_file "kubectl-pods.txt" kubectl get pods -A -o wide
+    capture_metadata_file "kubectl-services.txt" kubectl get services -A -o wide
+    capture_metadata_file "kubectl-deployments.txt" kubectl get deployments -A -o wide
+    date -u +%Y-%m-%dT%H:%M:%SZ > "${METADATA_DIR}/ready.txt"
+
+    if pgrep -f "http.server ${METADATA_PORT}.*${METADATA_DIR}" >/dev/null 2>&1; then
+        echo "Metadata HTTP server already running."
+        return
+    fi
+
+    nohup python3 -m http.server "${METADATA_PORT}" \
+        --bind "${CONTROL_IP}" \
+        --directory "${METADATA_DIR}" \
+        > "${LOG_DIR}/metadata-server.log" 2>&1 &
+    echo "Started metadata HTTP server on ${CONTROL_IP}:${METADATA_PORT}"
+}
+
+install_istio
+
+kubectl apply -f /local/repository/k8s/prometheus.yaml
+kubectl apply -f /local/repository/k8s/node-exporter.yaml
+kubectl apply -f /local/repository/k8s/kube-state-metrics.yaml
+
+kubectl rollout status deployment/prometheus -n istio-system --timeout=600s
+kubectl rollout status deployment/kube-state-metrics -n kube-system --timeout=300s
+kubectl rollout status daemonset/prometheus-node-exporter -n istio-system --timeout=300s
+patch_nodeport prometheus istio-system http 9090 9090 "${PROMETHEUS_PORT}"
+
 if [ -d "${APP_DIR}/.git" ]; then
     git -C "${APP_DIR}" fetch --all --tags
 else
@@ -119,34 +180,10 @@ git fetch origin "${REPO_REF}" || true
 git checkout "${REPO_REF}" || git checkout "origin/${REPO_REF}" || git checkout --detach "${REPO_REF}"
 
 kubectl apply -f release/kubernetes-manifests.yaml
-
-kubectl patch service frontend-external --type merge -p "{
-  \"spec\": {
-    \"type\": \"NodePort\",
-    \"ports\": [
-      {
-        \"name\": \"http\",
-        \"port\": 80,
-        \"targetPort\": 8080,
-        \"nodePort\": ${NODE_PORT}
-      }
-    ]
-  }
-}"
+patch_nodeport frontend-external default http 80 8080 "${NODE_PORT}"
 
 kubectl apply -f /local/repository/k8s/jaeger.yaml
-kubectl patch service jaeger-ui --type merge -p "{
-  \"spec\": {
-    \"ports\": [
-      {
-        \"name\": \"ui\",
-        \"port\": 16686,
-        \"targetPort\": 16686,
-        \"nodePort\": ${JAEGER_UI_PORT}
-      }
-    ]
-  }
-}"
+patch_nodeport jaeger-ui default ui 16686 16686 "${JAEGER_UI_PORT}"
 kubectl rollout status deployment/jaeger --timeout=300s
 
 for service in \
@@ -173,71 +210,44 @@ for service in \
     recommendationservice; do
     kubectl rollout status "deployment/${service}" --timeout=600s
 done
+
 kubectl get nodes -o wide
-kubectl get pods -o wide
+kubectl get pods -A -o wide
 kubectl get service frontend-external -o wide
 kubectl get service jaeger jaeger-ui -o wide
+kubectl get service prometheus -n istio-system -o wide
 
-BENCHMARK_OUTPUT_DIR=""
-if [ "${BENCHMARK_ENABLED}" = "true" ]; then
-    RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-    BENCHMARK_OUTPUT_DIR="${BENCHMARK_OUTPUT_ROOT}/${RUN_ID}"
-    FRONTEND_ENDPOINT="http://$(hostname -f):${NODE_PORT}/"
-    JAEGER_CLUSTER_IP="$(kubectl get svc/jaeger -o jsonpath='{.spec.clusterIP}')"
-    JAEGER_URL="http://${JAEGER_CLUSTER_IP}:16686"
-
-    echo "Starting benchmark run ${RUN_ID}"
-    /local/repository/scripts/run-benchmark.py \
-        --config "${BENCHMARK_CONFIG}" \
-        --endpoint "${FRONTEND_ENDPOINT}" \
-        --jaeger-url "${JAEGER_URL}" \
-        --output-dir "${BENCHMARK_OUTPUT_DIR}" \
-        --target-rps "${BENCHMARK_TARGET_RPS}" \
-        --duration-seconds "${BENCHMARK_DURATION_SECONDS}" \
-        --warmup-seconds "${BENCHMARK_WARMUP_SECONDS}" \
-        --concurrency "${BENCHMARK_CONCURRENCY}" \
-        --request-timeout-seconds "${BENCHMARK_REQUEST_TIMEOUT_SECONDS}" \
-        --request-paths "${BENCHMARK_REQUEST_PATHS}" \
-        --rtt-samples "${BENCHMARK_RTT_SAMPLES}" \
-        --trace-limit "${BENCHMARK_TRACE_LIMIT}" \
-        --lookback "${BENCHMARK_LOOKBACK}"
-    echo "Finished benchmark run ${RUN_ID}; output: ${BENCHMARK_OUTPUT_DIR}"
-
-    if [ "${RESULTS_PUSH_ENABLED}" = "true" ]; then
-        /local/repository/scripts/push-benchmark-results.sh \
-            "${BENCHMARK_OUTPUT_DIR}" \
-            "${RESULTS_REPO}" \
-            "${RESULTS_BRANCH}"
-    fi
-fi
+publish_metadata
 
 cat > "${ACCESS_FILE}" <<EOF
 Online Boutique is deployed on a multi-node K3s cluster.
 
 Frontend:
   http://$(hostname -f):${NODE_PORT}
+  http://${CONTROL_IP}:${NODE_PORT}
 
 Jaeger UI:
   http://$(hostname -f):${JAEGER_UI_PORT}
+  http://${CONTROL_IP}:${JAEGER_UI_PORT}
+
+Prometheus:
+  http://$(hostname -f):${PROMETHEUS_PORT}
+  http://${CONTROL_IP}:${PROMETHEUS_PORT}
+
+Benchmark:
+  Runs automatically from the dedicated benchmark node.
 
 Useful commands:
   sudo tail -f ${LOG_DIR}/online-boutique-setup.log
+  sudo tail -f ${LOG_DIR}/metadata-server.log
   sudo kubectl get nodes -o wide
-  sudo kubectl get pods -o wide
+  sudo kubectl get pods -A -o wide
   sudo kubectl get service frontend-external
   sudo kubectl get service jaeger jaeger-ui
-  /local/repository/scripts/collect-latency.py --endpoint http://$(hostname -f):${NODE_PORT}/
-  /local/repository/scripts/run-benchmark.py --endpoint http://$(hostname -f):${NODE_PORT}/
+  sudo kubectl get service prometheus -n istio-system
 
-Benchmark:
-  Enabled: ${BENCHMARK_ENABLED}
-  Target RPS: ${BENCHMARK_TARGET_RPS}
-  Duration seconds: ${BENCHMARK_DURATION_SECONDS}
-  Warmup seconds: ${BENCHMARK_WARMUP_SECONDS}
-  Concurrency: ${BENCHMARK_CONCURRENCY}
-  Request paths: ${BENCHMARK_REQUEST_PATHS}
-  Results push enabled: ${RESULTS_PUSH_ENABLED}
-  Last output directory: ${BENCHMARK_OUTPUT_DIR:-not run}
+Metadata:
+  http://${CONTROL_IP}:${METADATA_PORT}/ready.txt
 EOF
 
 cat "${ACCESS_FILE}"

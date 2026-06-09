@@ -1,23 +1,12 @@
 """Deploy Online Boutique on a multi-node K3s cluster.
 
 This repository-based CloudLab profile creates one Kubernetes control-plane
-node and a configurable number of worker nodes. CloudLab clones this profile
-repository to /local/repository on every experiment node before running the
-startup commands.
+node, a configurable number of worker nodes, and one dedicated benchmark node.
+CloudLab clones this profile repository to /local/repository on every
+experiment node before running the startup commands.
 
-Instructions:
-Wait for the control node to finish setup. Then open:
-
-    http://<control-hostname>:30080
-
-You can watch progress with:
-
-    sudo tail -f /local/logs/online-boutique-setup.log
-
-Kubernetes access is available on the control node with:
-
-    sudo kubectl get nodes -o wide
-    sudo kubectl get pods -o wide
+CloudLab geni-lib evaluates this profile with Python 2. Keep this file
+Python-2-compatible even though the benchmark runner uses uv-managed Python 3.
 """
 
 try:
@@ -33,6 +22,7 @@ DEFAULT_REPO = "https://github.com/GoogleCloudPlatform/microservices-demo.git"
 DEFAULT_REF = "main"
 DEFAULT_NODE_PORT = 30080
 DEFAULT_JAEGER_UI_PORT = 30686
+DEFAULT_PROMETHEUS_PORT = 30090
 DEFAULT_WORKER_COUNT = 2
 DEFAULT_K3S_TOKEN = "cloudlab-online-boutique-k3s"
 DEFAULT_RESULTS_REPO = "git@github.com:yamada-sexta/online-boutique-bench-res.git"
@@ -48,7 +38,10 @@ DEFAULT_BENCHMARK_REQUEST_PATHS = "/"
 DEFAULT_BENCHMARK_RTT_SAMPLES = 10
 DEFAULT_BENCHMARK_TRACE_LIMIT = 500
 DEFAULT_BENCHMARK_LOOKBACK = "1h"
+DEFAULT_RESOURCE_WINDOW = "5m"
 CONTROL_IP = "192.168.10.10"
+BENCHMARK_IP = "192.168.10.250"
+METADATA_PORT = 18080
 NETMASK = "255.255.255.0"
 
 
@@ -100,16 +93,16 @@ portal.context.defineParameter(
     DEFAULT_JAEGER_UI_PORT,
 )
 portal.context.defineParameter(
+    "prometheus_port",
+    "Prometheus NodePort",
+    portal.ParameterType.INTEGER,
+    DEFAULT_PROMETHEUS_PORT,
+)
+portal.context.defineParameter(
     "k3s_token",
     "K3s cluster join token",
     portal.ParameterType.STRING,
     DEFAULT_K3S_TOKEN,
-)
-portal.context.defineParameter(
-    "benchmark_enabled",
-    "Run benchmark after deployment",
-    portal.ParameterType.BOOLEAN,
-    True,
 )
 portal.context.defineParameter(
     "benchmark_target_rps",
@@ -166,6 +159,12 @@ portal.context.defineParameter(
     DEFAULT_BENCHMARK_LOOKBACK,
 )
 portal.context.defineParameter(
+    "resource_window",
+    "Prometheus resource query window",
+    portal.ParameterType.STRING,
+    DEFAULT_RESOURCE_WINDOW,
+)
+portal.context.defineParameter(
     "results_push_enabled",
     "Push benchmark results to git",
     portal.ParameterType.BOOLEAN,
@@ -218,29 +217,28 @@ if not (
         )
     )
 
-if params.node_port < 30000 or params.node_port > 32767:
-    portal.context.reportError(
-        portal.ParameterError(
-            "node_port must be in Kubernetes' default NodePort range, 30000-32767.",
-            ["node_port"],
+node_ports = [
+    ("node_port", params.node_port),
+    ("jaeger_ui_port", params.jaeger_ui_port),
+    ("prometheus_port", params.prometheus_port),
+]
+seen_ports = {}
+for name, value in node_ports:
+    if value < 30000 or value > 32767:
+        portal.context.reportError(
+            portal.ParameterError(
+                name + " must be in Kubernetes' default NodePort range, 30000-32767.",
+                [name],
+            )
         )
-    )
-
-if params.jaeger_ui_port < 30000 or params.jaeger_ui_port > 32767:
-    portal.context.reportError(
-        portal.ParameterError(
-            "jaeger_ui_port must be in Kubernetes' default NodePort range, 30000-32767.",
-            ["jaeger_ui_port"],
+    if value in seen_ports:
+        portal.context.reportError(
+            portal.ParameterError(
+                name + " must be different from " + seen_ports[value] + ".",
+                [name, seen_ports[value]],
+            )
         )
-    )
-
-if params.jaeger_ui_port == params.node_port:
-    portal.context.reportError(
-        portal.ParameterError(
-            "jaeger_ui_port must be different from node_port.",
-            ["jaeger_ui_port", "node_port"],
-        )
-    )
+    seen_ports[value] = name
 
 if len(params.k3s_token) < 8 or " " in params.k3s_token:
     portal.context.reportError(
@@ -345,6 +343,14 @@ if not valid_lookback(params.benchmark_lookback):
         )
     )
 
+if not valid_lookback(params.resource_window):
+    portal.context.reportError(
+        portal.ParameterError(
+            "resource_window must use digits and a Prometheus time unit like 30m, 1h, or 2d.",
+            ["resource_window"],
+        )
+    )
+
 if params.results_branch and " " in params.results_branch:
     portal.context.reportError(
         portal.ParameterError(
@@ -392,21 +398,10 @@ control_command = " ".join(
         shell_quote(params.repo_ref),
         str(params.node_port),
         str(params.jaeger_ui_port),
-        shell_quote(bool_arg(params.benchmark_enabled)),
-        shell_quote(bool_arg(params.results_push_enabled)),
-        shell_quote(params.results_repo),
-        shell_quote(params.results_branch),
+        str(params.prometheus_port),
+        str(METADATA_PORT),
         shell_quote(params.github_key_user),
         shell_quote(params.ssh_key_login),
-        str(params.benchmark_target_rps),
-        str(params.benchmark_duration_seconds),
-        str(params.benchmark_warmup_seconds),
-        str(params.benchmark_concurrency),
-        str(params.benchmark_request_timeout_seconds),
-        shell_quote(params.benchmark_request_paths),
-        str(params.benchmark_rtt_samples),
-        str(params.benchmark_trace_limit),
-        shell_quote(params.benchmark_lookback),
     ]
 )
 control.addService(rspec.Execute(shell="bash", command=control_command))
@@ -431,5 +426,39 @@ for i in range(params.worker_count):
         ]
     )
     worker.addService(rspec.Execute(shell="bash", command=worker_command))
+
+benchmark = request.RawPC("benchmark")
+benchmark.disk_image = "urn:publicid:IDN+emulab.net+image+emulab-ops//UBUNTU22-64-STD"
+benchmark_iface = benchmark.addInterface("if0")
+benchmark_iface.addAddress(rspec.IPv4Address(BENCHMARK_IP, NETMASK))
+lan.addInterface(benchmark_iface)
+
+benchmark_command = " ".join(
+    [
+        "sudo",
+        "/local/repository/scripts/setup-benchmark-runner.sh",
+        shell_quote(CONTROL_IP),
+        str(params.node_port),
+        str(params.jaeger_ui_port),
+        str(params.prometheus_port),
+        str(METADATA_PORT),
+        shell_quote(bool_arg(params.results_push_enabled)),
+        shell_quote(params.results_repo),
+        shell_quote(params.results_branch),
+        shell_quote(params.github_key_user),
+        shell_quote(params.ssh_key_login),
+        str(params.benchmark_target_rps),
+        str(params.benchmark_duration_seconds),
+        str(params.benchmark_warmup_seconds),
+        str(params.benchmark_concurrency),
+        str(params.benchmark_request_timeout_seconds),
+        shell_quote(params.benchmark_request_paths),
+        str(params.benchmark_rtt_samples),
+        str(params.benchmark_trace_limit),
+        shell_quote(params.benchmark_lookback),
+        shell_quote(params.resource_window),
+    ]
+)
+benchmark.addService(rspec.Execute(shell="bash", command=benchmark_command))
 
 portal.context.printRequestRSpec()
