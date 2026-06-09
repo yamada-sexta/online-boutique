@@ -126,7 +126,7 @@ data:
         target_label: __metrics_path__
       - action: replace
         source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
-        regex: (\d+);(([0-9]+?)(\.|$)){4}
+        regex: (\d+);(.+)
         replacement: $2:$1
         target_label: __address__
       - action: labelmap

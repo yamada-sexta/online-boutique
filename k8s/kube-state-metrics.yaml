@@ -115,6 +115,6 @@ spec:
         livenessProbe:
           httpGet:
             path: /livez
-            port: telemetry
+            port: http-metrics
           initialDelaySeconds: 15
           periodSeconds: 20
