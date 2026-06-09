@@ -12,7 +12,7 @@ Python-2-compatible even though the benchmark runner uses uv-managed Python 3.
 try:
     from shlex import quote as shell_quote
 except ImportError:
-    from pipes import quote as shell_quote
+    from pipes import quote as shell_quote #type: ignore
 
 import geni.portal as portal
 import geni.rspec.pg as rspec

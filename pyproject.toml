@@ -7,3 +7,9 @@ requires-python = ">=3.14"
 dependencies = [
     "geni-lib>=0.9.9.4",
 ]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]
